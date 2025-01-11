@@ -27,6 +27,13 @@ export async function extractYouTubeVideo(url: string, format?: string, quality?
         if (!videoInfo.formats || videoInfo.formats.length === 0) {
             throw new Error('No video formats found');
         }
+
+        // Filter out formats without URLs
+        videoInfo.formats = videoInfo.formats.filter(format => format.url && format.url.length > 0);
+        
+        if (videoInfo.formats.length === 0) {
+            throw new Error('No formats with valid URLs found');
+        }
         
         return {
             title: videoInfo.title,
@@ -44,33 +51,98 @@ export async function extractYouTubeVideo(url: string, format?: string, quality?
     }
 }
 
-// Function to get formats by media type
-export async function getFormatsByType(url: string, type: 'audio' | 'video'): Promise<VideoFormat[]> {
+// Helper function to decode cipher
+function decodeCipher(signatureCipher: string): string {
     try {
-        const videoId = extractVideoId(url);
-        const videoInfo = await fetchVideoInfo(videoId);
-        return videoInfo.formats.filter(format => format.type === type);
-    } catch (error) {
-        if (error instanceof Error) {
-            throw new Error(`Failed to get ${type} formats: ${error.message}`);
+        const params = new URLSearchParams(signatureCipher);
+        const url = params.get('url') || '';
+        const sp = params.get('sp') || '';
+        const s = params.get('s') || '';
+        
+        if (!url) return '';
+        
+        // Construct the final URL with the signature
+        const decodedUrl = decodeURIComponent(url);
+        if (s && sp) {
+            return `${decodedUrl}&${sp}=${encodeURIComponent(s)}`;
         }
-        throw new Error(`Failed to get ${type} formats: Unknown error`);
+        return decodedUrl;
+    } catch (error) {
+        console.error('Error decoding cipher:', error);
+        return '';
     }
 }
 
-export async function listAvailableFormats(url: string): Promise<VideoFormat[]> {
+function extractFormatsFromPlayerResponse(playerResponse: any): VideoFormat[] {
+    const formats: VideoFormat[] = [];
+    
     try {
-        const videoId = extractVideoId(url);
-        const videoInfo = await fetchVideoInfo(videoId);
-        return videoInfo.formats;
+        const streamingData = playerResponse?.streamingData;
+        if (!streamingData) return formats;
+
+        // Process adaptive formats
+        const adaptiveFormats = streamingData.adaptiveFormats || [];
+        adaptiveFormats.forEach((format: any) => {
+            let finalUrl = '';
+            if (format.url) {
+                finalUrl = format.url;
+            } else if (format.signatureCipher) {
+                finalUrl = decodeCipher(format.signatureCipher);
+            }
+
+            if (finalUrl) {
+                const { mimeType, type } = getMimeType(format.mimeType);
+                formats.push({
+                    quality: format.qualityLabel || format.quality,
+                    format: mimeType.split('/')[1] || 'unknown',
+                    mimeType,
+                    type,
+                    size: format.contentLength ? parseInt(format.contentLength) : 0,
+                    url: finalUrl
+                });
+            }
+        });
+
+        // Process regular formats
+        const regularFormats = streamingData.formats || [];
+        regularFormats.forEach((format: any) => {
+            let finalUrl = '';
+            if (format.url) {
+                finalUrl = format.url;
+            } else if (format.signatureCipher) {
+                finalUrl = decodeCipher(format.signatureCipher);
+            }
+
+            if (finalUrl) {
+                const { mimeType, type } = getMimeType(format.mimeType);
+                formats.push({
+                    quality: format.qualityLabel || format.quality,
+                    format: mimeType.split('/')[1] || 'unknown',
+                    mimeType,
+                    type,
+                    size: format.contentLength ? parseInt(format.contentLength) : 0,
+                    url: finalUrl
+                });
+            }
+        });
+
+        // Sort formats by quality (resolution for video, bitrate for audio)
+        return formats.sort((a, b) => {
+            if (a.type === 'video' && b.type === 'video') {
+                const aQuality = parseInt(a.quality.replace(/[^\d]/g, '') || '0');
+                const bQuality = parseInt(b.quality.replace(/[^\d]/g, '') || '0');
+                return bQuality - aQuality;
+            }
+            return 0;
+        });
     } catch (error) {
-        if (error instanceof Error) {
-            throw new Error(`Failed to list formats: ${error.message}`);
-        }
-        throw new Error('Failed to list formats: Unknown error');
+        console.error('Error extracting formats from player response:', error);
     }
+
+    return formats;
 }
 
+// Rest of the functions remain the same
 function extractVideoId(url: string): string {
     const regex = /(?:youtube\.com\/(?:[^\/]+\/.+\/|(?:v|e(?:mbed)?)\/|.*[?&]v=)|youtu\.be\/)([^"&?\/\s]{11})/;
     const match = url.match(regex);
@@ -129,7 +201,6 @@ async function fetchVideoInfo(videoId: string): Promise<VideoInfo> {
         const formats = extractFormatsFromPlayerResponse(playerResponse);
         
         if (formats.length === 0) {
-            console.error('No formats found in player response');
             throw new Error('No video formats found');
         }
         
@@ -154,55 +225,44 @@ function getMimeType(mimeTypeStr: string): { mimeType: string; type: 'audio' | '
     };
 }
 
-function extractFormatsFromPlayerResponse(playerResponse: any): VideoFormat[] {
-    const formats: VideoFormat[] = [];
-    
-    try {
-        const streamingData = playerResponse?.streamingData;
-        if (!streamingData) return formats;
-
-        // Process adaptive formats
-        const adaptiveFormats = streamingData.adaptiveFormats || [];
-        adaptiveFormats.forEach((format: any) => {
-            if (format.url || format.signatureCipher) {
-                const { mimeType, type } = getMimeType(format.mimeType);
-                formats.push({
-                    quality: format.qualityLabel || format.quality,
-                    format: mimeType.split('/')[1] || 'unknown',
-                    mimeType,
-                    type,
-                    size: format.contentLength ? parseInt(format.contentLength) : 0,
-                    url: format.url || ''
-                });
-            }
-        });
-
-        // Process formats
-        const regularFormats = streamingData.formats || [];
-        regularFormats.forEach((format: any) => {
-            if (format.url || format.signatureCipher) {
-                const { mimeType, type } = getMimeType(format.mimeType);
-                formats.push({
-                    quality: format.qualityLabel || format.quality,
-                    format: mimeType.split('/')[1] || 'unknown',
-                    mimeType,
-                    type,
-                    size: format.contentLength ? parseInt(format.contentLength) : 0,
-                    url: format.url || ''
-                });
-            }
-        });
-    } catch (error) {
-        console.error('Error extracting formats from player response:', error);
-    }
-
-    return formats;
-}
-
 function extractDuration(playerResponse: any): number {
     try {
         return parseInt(playerResponse?.videoDetails?.lengthSeconds || '0', 10);
     } catch (error) {
         return 0;
     }
+}
+
+export async function getFormatsByType(url: string, type: 'audio' | 'video'): Promise<VideoFormat[]> {
+    try {
+        const videoId = extractVideoId(url);
+        const videoInfo = await fetchVideoInfo(videoId);
+        return videoInfo.formats.filter(format => format.type === type);
+    } catch (error) {
+        if (error instanceof Error) {
+            throw new Error(`Failed to get ${type} formats: ${error.message}`);
+        }
+        throw new Error(`Failed to get ${type} formats: Unknown error`);
+    }
+}
+
+export async function listAvailableFormats(url: string): Promise<VideoFormat[]> {
+    try {
+        const videoId = extractVideoId(url);
+        const videoInfo = await fetchVideoInfo(videoId);
+        return videoInfo.formats;
+    } catch (error) {
+        if (error instanceof Error) {
+            throw new Error(`Failed to list formats: ${error.message}`);
+        }
+        throw new Error('Failed to list formats: Unknown error');
+    }
+}
+
+export function getSupportedQualities(): string[] {
+    return ['144p', '240p', '360p', '480p', '720p', '1080p', '1440p', '2160p', 'highest'];
+}
+
+export function getSupportedFormats(): string[] {
+    return ['mp4', 'webm'];
 }

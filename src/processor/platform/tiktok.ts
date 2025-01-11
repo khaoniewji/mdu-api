@@ -21,7 +21,7 @@ interface VideoFormat {
 
 export async function extractTikTokVideo(url: string): Promise<VideoMetadata> {
     try {
-        const cleanUrl = sanitizeTikTokUrl(url);
+        const cleanUrl = await sanitizeTikTokUrl(url);
         const videoInfo = await fetchTikTokInfo(cleanUrl);
         
         if (!videoInfo.formats || videoInfo.formats.length === 0) {
@@ -44,13 +44,23 @@ export async function extractTikTokVideo(url: string): Promise<VideoMetadata> {
     }
 }
 
-function sanitizeTikTokUrl(url: string): string {
+async function sanitizeTikTokUrl(url: string): Promise<string> {
     try {
-        const urlObj = new URL(url);
+        const response = await fetch(url, {
+            method: 'HEAD',
+            redirect: 'follow',
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            }
+        });
+        
+        // Get the final URL after redirects
+        const finalUrl = response.url;
+        const urlObj = new URL(finalUrl);
         
         // Handle different TikTok URL formats
         if (urlObj.hostname === 'vm.tiktok.com' || urlObj.hostname === 'vt.tiktok.com') {
-            return url;
+            return finalUrl;
         }
         
         // For regular TikTok URLs, clean up unnecessary parameters
@@ -73,29 +83,20 @@ function sanitizeTikTokUrl(url: string): string {
 
 async function fetchTikTokInfo(url: string): Promise<TikTokVideoInfo> {
     try {
-        // Enhanced browser-like headers
         const headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
             'Accept-Language': 'en-US,en;q=0.9',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Cache-Control': 'no-cache',
-            'Pragma': 'no-cache',
             'Sec-Ch-Ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
             'Sec-Ch-Ua-Mobile': '?0',
             'Sec-Ch-Ua-Platform': '"Windows"',
-            'Sec-Fetch-Dest': 'document',
-            'Sec-Fetch-Mode': 'navigate',
-            'Sec-Fetch-Site': 'none',
-            'Sec-Fetch-User': '?1',
             'Upgrade-Insecure-Requests': '1'
         };
 
-        // First request to handle redirects and get the final URL
+        // Fetch main page first
         const response = await fetch(url, {
             headers,
-            redirect: 'follow',
-            follow: 5 // Allow up to 5 redirects
+            redirect: 'follow'
         });
 
         if (!response.ok) {
@@ -105,20 +106,39 @@ async function fetchTikTokInfo(url: string): Promise<TikTokVideoInfo> {
         const html = await response.text();
         const $ = cheerio.load(html);
 
-        // Extract video metadata from multiple possible locations
-        const videoData = extractVideoData($);
-        const formats = await extractFormats($, videoData);
+        // Extract video data using multiple methods
+        const videoData = await extractVideoData($);
+        let formats = await extractFormats($, videoData);
 
-        if (!formats || formats.length === 0) {
-            // Fallback method: Try to extract from embed data
+        // If no formats found, try embed method
+        if (formats.length === 0) {
             const embedUrl = await getEmbedUrl(url);
             if (embedUrl) {
                 const embedFormats = await extractFromEmbed(embedUrl);
-                if (embedFormats && embedFormats.length > 0) {
-                    formats.push(...embedFormats);
-                }
+                formats = [...formats, ...embedFormats];
             }
         }
+
+        // If still no formats, try API method
+        if (formats.length === 0) {
+            const apiFormats = await extractFromApi(url);
+            formats = [...formats, ...apiFormats];
+        }
+
+        // Filter out duplicate URLs and empty URLs
+        formats = formats
+            .filter(format => format.url && format.url.length > 0)
+            .filter((format, index, self) => 
+                index === self.findIndex(t => t.url === format.url)
+            );
+
+        // Sort formats by quality
+        formats.sort((a, b) => {
+            // Prioritize no-watermark versions
+            if (a.quality.includes('no watermark') && !b.quality.includes('no watermark')) return -1;
+            if (!a.quality.includes('no watermark') && b.quality.includes('no watermark')) return 1;
+            return 0;
+        });
 
         return {
             title: extractTitle($, videoData),
@@ -132,9 +152,59 @@ async function fetchTikTokInfo(url: string): Promise<TikTokVideoInfo> {
     }
 }
 
-function extractVideoData($: cheerio.CheerioAPI): any {
+async function extractFromApi(url: string): Promise<VideoFormat[]> {
+    try {
+        const videoId = url.split('/video/')[1]?.split('?')[0];
+        if (!videoId) return [];
+
+        const apiUrl = `https://api16-normal-c-useast1a.tiktokv.com/aweme/v1/feed/?aweme_id=${videoId}`;
+        const response = await fetch(apiUrl, {
+            headers: {
+                'User-Agent': 'TikTok 26.2.0 rv:262018 (iPhone; iOS 14.4.2; en_US) Cronet'
+            }
+        });
+
+        if (!response.ok) return [];
+
+        const data = await response.json();
+        const videoData = (data as any).aweme_list?.[0];
+        if (!videoData) return [];
+
+        const formats: VideoFormat[] = [];
+        
+        // Add no watermark version if available
+        if (videoData.video?.play_addr?.url_list?.[0]) {
+            formats.push({
+                quality: 'original (no watermark)',
+                format: 'mp4',
+                size: 0,
+                url: videoData.video.play_addr.url_list[0],
+                mimeType: 'video/mp4',
+                type: 'video'
+            });
+        }
+
+        // Add watermarked version if available
+        if (videoData.video?.download_addr?.url_list?.[0]) {
+            formats.push({
+                quality: 'original (watermark)',
+                format: 'mp4',
+                size: 0,
+                url: videoData.video.download_addr.url_list[0],
+                mimeType: 'video/mp4',
+                type: 'video'
+            });
+        }
+
+        return formats;
+    } catch (error) {
+        console.error('Failed to extract from API:', error);
+        return [];
+    }
+}
+
+async function extractVideoData($: cheerio.CheerioAPI): Promise<any> {
     // Try multiple methods to extract video data
-    const scripts = $('script').get();
     let videoData = {};
 
     // Method 1: JSON-LD data
@@ -160,21 +230,17 @@ function extractVideoData($: cheerio.CheerioAPI): any {
         }
     }
 
-    // Method 3: Embedded video data
+    // Method 3: SIGI_STATE data
     if (Object.keys(videoData).length === 0) {
-        scripts.forEach(script => {
-            const content = $(script).html() || '';
-            if (content.includes('window.__INIT_PROPS__')) {
-                try {
-                    const dataMatch = content.match(/window\.__INIT_PROPS__\s*=\s*({.+?});/);
-                    if (dataMatch) {
-                        videoData = JSON.parse(dataMatch[1]);
-                    }
-                } catch (e) {
-                    console.error('Failed to parse embedded data:', e);
-                }
+        const sigiState = $('script#SIGI_STATE').html();
+        if (sigiState) {
+            try {
+                const parsed = JSON.parse(sigiState);
+                videoData = parsed.ItemModule?.[Object.keys(parsed.ItemModule)[0]] || {};
+            } catch (e) {
+                console.error('Failed to parse SIGI_STATE:', e);
             }
-        });
+        }
     }
 
     return videoData;
@@ -186,7 +252,7 @@ async function extractFormats($: cheerio.CheerioAPI, videoData: any): Promise<Vi
     // Method 1: Direct video element
     $('video[src]').each((_, elem) => {
         const src = $(elem).attr('src');
-        if (src) {
+        if (src && src.startsWith('http')) {
             formats.push({
                 quality: 'original',
                 format: 'mp4',
@@ -202,7 +268,7 @@ async function extractFormats($: cheerio.CheerioAPI, videoData: any): Promise<Vi
     const videoUrl = $('meta[property="og:video"]').attr('content') ||
                     $('meta[property="og:video:url"]').attr('content');
     
-    if (videoUrl) {
+    if (videoUrl && videoUrl.startsWith('http')) {
         formats.push({
             quality: 'original',
             format: 'mp4',
@@ -214,16 +280,23 @@ async function extractFormats($: cheerio.CheerioAPI, videoData: any): Promise<Vi
     }
 
     // Method 3: Video data from script tags
-    if (videoData.videoUrl || videoData.video?.playAddr) {
+    const videoUrls = [
+        videoData.videoUrl,
+        videoData.video?.playAddr,
+        videoData.video?.downloadAddr,
+        videoData.video?.playUrl
+    ].filter(url => url && url.startsWith('http'));
+
+    videoUrls.forEach(url => {
         formats.push({
             quality: 'original',
             format: 'mp4',
             size: 0,
-            url: videoData.videoUrl || videoData.video.playAddr,
+            url,
             mimeType: 'video/mp4',
             type: 'video'
         });
-    }
+    });
 
     return formats;
 }
@@ -325,4 +398,12 @@ export async function listAvailableFormats(url: string): Promise<VideoFormat[]> 
         }
         throw new Error('Failed to list formats: Unknown error');
     }
+}
+
+export function getSupportedQualities(): string[] {
+    return ['original', 'original (no watermark)', 'original (watermark)', 'original (embed)'];
+}
+
+export function getSupportedFormats(): string[] {
+    return ['mp4'];
 }
