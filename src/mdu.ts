@@ -1,8 +1,8 @@
 import { Elysia, t } from 'elysia'
 import { swagger } from '@elysiajs/swagger'
-import { extractVideo } from './src/processor/extractvideo'
-import { listAvailableFormats, getFormatsByType } from './src/processor/platform/youtube'
-import { listAvailableFormats as listTikTokFormats } from './src/processor/platform/tiktok'
+import { extractVideo } from './processor/extractvideo'
+import { listAvailableFormats, getFormatsByType } from './processor/platform/youtube'
+import { listAvailableFormats as listTikTokFormats } from './processor/platform/tiktok'
 
 const app = new Elysia()
     .use(swagger({
