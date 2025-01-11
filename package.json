@@ -1,0 +1,19 @@
+{
+  "name": "mdu-api",
+  "module": "index.ts",
+  "type": "module",
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5.0.0"
+  },
+  "dependencies": {
+    "@elysiajs/cookie": "^0.8.0",
+    "@elysiajs/swagger": "^1.2.0",
+    "cheerio": "^1.0.0",
+    "dotenv": "^16.4.7",
+    "elysia": "^1.2.10",
+    "node-fetch": "^3.3.2"
+  }
+}
